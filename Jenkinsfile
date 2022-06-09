@@ -1,54 +1,195 @@
-node
- {
-  
-  def mavenHome = tool name: "maven3.6.2"
-  
-      echo "GitHub BranhName ${env.BRANCH_NAME}"
-      echo "Jenkins Job Number ${env.BUILD_NUMBER}"
-      echo "Jenkins Node Name ${env.NODE_NAME}"
-  
-      echo "Jenkins Home ${env.JENKINS_HOME}"
-      echo "Jenkins URL ${env.JENKINS_URL}"
-      echo "JOB Name ${env.JOB_NAME}"
-  
-   properties([[$class: 'JiraProjectProperty'], buildDiscarder(logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '2', daysToKeepStr: '', numToKeepStr: '2')), pipelineTriggers([pollSCM('* * * * *')])])
-  
-  stage("CheckOutCodeGit")
-  {
-   git branch: 'development', credentialsId: '65fb834f-a83b-4fe7-8e11-686245c47a65', url: 'https://github.com/MithunTechnologiesDevOps/maven-web-application.git'
- }
+def scan_type
+ def target
+ pipeline {
+     agent any
+     parameters {
+         choice  choices: ["Baseline", "APIS", "Full"],
+                 description: 'Type of scan that is going to perform inside the container',
+                 name: 'SCAN_TYPE'
  
- stage("Build")
- {
- sh "${mavenHome}/bin/mvn clean package"
- }
+         string defaultValue: "https://github.com/tools-haus/WebGoat",
+                 description: 'Target URL to scan',
+                 name: 'TARGET'
  
-  /*
- stage("ExecuteSonarQubeReport")
- {
- sh "${mavenHome}/bin/mvn sonar:sonar"
- }
+         booleanParam defaultValue: true,
+                 description: 'Parameter to know if wanna generate report.',
+                 name: 'GENERATE_REPORT'
+     }
+     stages {
+         stage('Pipeline Info') {
+                 steps {
+                     script {
+                         echo "<--Parameter Initialization-->"
+                         echo """
+                         The current parameters are:
+                             Scan Type: ${params.SCAN_TYPE}
+                             Target: ${params.TARGET}
+                             Generate report: ${params.GENERATE_REPORT}
+                         """
+                     }
+                 }
+         }
  
- stage("UploadArtifactsintoNexus")
- {
- sh "${mavenHome}/bin/mvn deploy"
- }
+ 			 stage('Setting up Trufflehog docker container') {
+				 steps {
+					 script {
+							 echo "Pulling up last Trufflehog container --> Start"
+							 sh 'docker pull trufflesecurity/trufflehog:latest'
+							 echo "Pulling up last VMS container --> End"
+							 echo "Starting container --> Start"
+							 sh """
+							 docker run -dt --name trufflehog \
+							 trufflesecurity/trufflehog:latest \
+							 /bin/bash
+							 """
+					 }
+				 }
+			 }
+	 
+	 
+			 stage('Prepare wrk directory') {
+				 when {
+							 environment name : 'GENERATE_REPORT', value: 'true'
+				 }
+				 steps {
+					 script {
+							 sh """
+								 docker exec trufflehog \
+								 mkdir /zap/wrk
+							 """
+						 }
+					 }
+			 }
+	 
+	 
+			 stage('Scanning target on trufflehog container') {
+				 steps {
+					 script {
+						 target = "${params.TARGET}"
+							 sh """
+								 docker exec trufflehog \
+								 trufflehog \
+								 -t $target \
+								 -x trufflehog_report.xml \
+								 -I
+							 """
+						
+					 }
+				 }
+			 }
+			 stage('Copy Report to Workspace'){
+				 steps {
+					 script {
+						 sh '''
+							 docker cp trufflehog:/zap/wrk/trufflehog_report.xml ${WORKSPACE}/trufflehog_report.xml
+						 '''
+					 }
+				 }
+			 }
+		 }
+     post {
+             always {
+                 echo "Removing container"
+                 sh '''
+                     docker stop trufflehog
+                     docker rm trufflehog
+                 '''
+             }
+         }
+		 
  
-  stage("DeployAppTomcat")
- {
-  sshagent(['423b5b58-c0a3-42aa-af6e-f0affe1bad0c']) {
-    sh "scp -o StrictHostKeyChecking=no target/maven-web-application.war  ec2-user@15.206.91.239:/opt/apache-tomcat-9.0.34/webapps/" 
-  }
- }
  
- stage('EmailNotification')
- {
- mail bcc: 'devopstrainingblr@gmail.com', body: '''Build is over
-
- Thanks,
- Mithun Technologies,
- 9980923226.''', cc: 'devopstrainingblr@gmail.com', from: '', replyTo: '', subject: 'Build is over!!', to: 'devopstrainingblr@gmail.com'
- }
- */
  
+ 
+			 stage("Setting up OWASP ZAP docker container") {
+				 steps {
+					 script {
+							 echo "Pulling up last OWASP ZAP container --> Start"
+							 sh 'docker pull owasp/zap2docker-stable'
+							 echo "Pulling up last VMS container --> End"
+							 echo "Starting container --> Start"
+							 sh """
+							 docker run -dt --name owasp \
+							 owasp/zap2docker-stable \
+							 /bin/bash
+							 """
+					 }
+				 }
+			 }
+	 
+	 
+			 stage('Prepare wrk directory') {
+				 when {
+							 environment name : 'GENERATE_REPORT', value: 'true'
+				 }
+				 steps {
+					 script {
+							 sh """
+								 docker exec owasp \
+								 mkdir /zap/wrk
+							 """
+						 }
+					 }
+			 }
+	 
+	 
+			 stage('Scanning target on owasp container') {
+				 steps {
+					 script {
+						 scan_type = "${params.SCAN_TYPE}"
+						 echo "----> scan_type: $scan_type"
+						 target = "${params.TARGET}"
+						 if(scan_type == "Baseline"){
+							 sh """
+								 docker exec owasp \
+								 zap-baseline.py \
+								 -t $target \
+								 -x report.xml \
+								 -I
+							 """
+						 }
+						 else if(scan_type == "APIS"){
+							 sh """
+								 docker exec owasp \
+								 zap-api-scan.py \
+								 -t $target \
+								 -x report.xml \
+								 -I
+							 """
+						 }
+						 else if(scan_type == "Full"){
+							 sh """
+								 docker exec owasp \
+								 zap-full-scan.py \
+								 -t $target \
+								 //-x report.xml
+								 -I
+							 """
+							 //-x report-$(date +%d-%b-%Y).xml
+						 }
+						 else{
+							 echo "Something went wrong..."
+						 }
+					 }
+				 }
+			 }
+			 stage('Copy Report to Workspace'){
+				 steps {
+					 script {
+						 sh '''
+							 docker cp owasp:/zap/wrk/report.xml ${WORKSPACE}/report.xml
+						 '''
+					 }
+				 }
+			 }
+		 
+     post {
+             always {
+                 echo "Removing container"
+                 sh '''
+                     docker stop owasp
+                     docker rm owasp
+                 '''
+             }
+         }
  }
